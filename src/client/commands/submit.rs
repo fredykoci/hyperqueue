@@ -8,7 +8,7 @@ use bstr::BString;
 use clap::Clap;
 use hashbrown::HashMap;
 use tako::common::resources::{CpuRequest, ResourceRequest};
-use tako::messages::common::ProgramDefinition;
+use tako::messages::common::{ProgramDefinition, StdioDef};
 
 use crate::client::globalsettings::GlobalSettings;
 use crate::client::job::print_job_detail;
@@ -56,17 +56,16 @@ impl FromStr for ArgEnvironmentVar {
 }
 
 /// Represents a filepath. If "none" is passed to it, it will behave as if no path is needed.
-struct OptionalPath(Option<PathBuf>);
+struct StdioArg(StdioDef);
 
-impl FromStr for OptionalPath {
+impl FromStr for StdioArg {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let path = match s {
-            "none" => None,
-            _ => Some(s.into()),
-        };
-        Ok(OptionalPath(path))
+        Ok(StdioArg(match s {
+            "none" => StdioDef::Null,
+            _ => StdioDef::File(s.into()),
+        }))
     }
 }
 
@@ -95,13 +94,13 @@ pub struct SubmitOpts {
 
     /// Path where the standard output of the job will be stored
     /// The path must be accessible from a worker node
-    #[clap(long, default_value("stdout.%{JOB_ID}.%{TASK_ID}"))]
-    stdout: OptionalPath,
+    #[clap(long)]
+    stdout: Option<StdioArg>,
 
     /// Path where the standard error of the job will be stored
     /// The path must be accessible from a worker node
-    #[clap(long, default_value("stderr.%{JOB_ID}.%{TASK_ID}"))]
-    stderr: OptionalPath,
+    #[clap(long)]
+    stderr: Option<StdioArg>,
 
     /// Specify additional environment variable for the job
     /// You can pass this flag multiple times to pass multiple variables
@@ -127,6 +126,9 @@ pub struct SubmitOpts {
 
     #[clap(long)]
     max_fails: Option<JobTaskCount>,
+
+    #[clap(long)]
+    log: Option<PathBuf>,
 }
 
 impl SubmitOpts {
@@ -170,8 +172,21 @@ pub async fn submit_computation(
     args.insert(0, opts.command.into());
 
     let cwd = Some(opts.cwd);
-    let stdout = opts.stdout.0;
-    let stderr = opts.stderr.0;
+    let log = opts.log;
+    let stdout = opts.stdout.map(|x| x.0).unwrap_or_else(|| {
+        if log.is_none() {
+            StdioDef::File("stdout.%{JOB_ID}.%{TASK_ID}".into())
+        } else {
+            StdioDef::Pipe
+        }
+    });
+    let stderr = opts.stderr.map(|x| x.0).unwrap_or_else(|| {
+        if log.is_none() {
+            StdioDef::File("stderr.%{JOB_ID}.%{TASK_ID}".into())
+        } else {
+            StdioDef::Pipe
+        }
+    });
 
     let env_count = opts.env.len();
     let env: HashMap<_, _> = opts
@@ -200,6 +215,7 @@ pub async fn submit_computation(
         pin: opts.pin,
         entries,
         max_fails: opts.max_fails,
+        log,
     });
     let response = rpc_call!(connection, message, ToClientMessage::SubmitResponse(r) => r).await?;
     print_job_detail(gsettings, response.job, true, false);

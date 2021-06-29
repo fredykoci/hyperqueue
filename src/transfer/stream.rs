@@ -6,6 +6,11 @@ use std::num::NonZeroU64;
 pub type ChannelId = u32;
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct RegisterStream {
+    pub job: JobId,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct StartTaskStreamMsg {
     pub task: JobTaskId,
 }
@@ -19,7 +24,6 @@ pub struct DataMsg {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct EndTaskStreamMsg {
-    pub job: JobId,
     pub task: JobTaskId,
 }
 
@@ -32,7 +36,6 @@ pub enum FromStreamerMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct EndTaskStreamResponseMsg {
-    pub job: JobId,
     pub task: JobTaskId,
 }
 

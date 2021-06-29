@@ -7,7 +7,14 @@ use crate::common::arraydef::ArrayDef;
 use crate::server::job::{JobTaskCounters, JobTaskInfo};
 use crate::{JobId, JobTaskCount, JobTaskId, WorkerId};
 use bstr::BString;
+use std::path::PathBuf;
 use tako::common::resources::ResourceRequest;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TaskBody {
+    pub program: ProgramDefinition,
+    pub pin: bool,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum JobType {
@@ -24,6 +31,7 @@ pub struct SubmitRequest {
     pub resources: ResourceRequest,
     pub pin: bool,
     pub entries: Option<Vec<BString>>,
+    pub log: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

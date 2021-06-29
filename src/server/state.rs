@@ -214,7 +214,7 @@ impl StateRef {
 
 #[cfg(test)]
 mod tests {
-    use tako::messages::common::ProgramDefinition;
+    use tako::messages::common::{ProgramDefinition, StdioDef};
 
     use crate::common::arraydef::ArrayDef;
     use crate::server::job::Job;
@@ -226,8 +226,8 @@ mod tests {
         ProgramDefinition {
             args: vec![],
             env: Default::default(),
-            stdout: None,
-            stderr: None,
+            stdout: StdioDef::Null,
+            stderr: StdioDef::Null,
             cwd: None,
         }
     }

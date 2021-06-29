@@ -14,7 +14,6 @@ use crate::common::WrappedRcRefCell;
 use crate::server::state::StateRef;
 use crate::stream::control::StreamServerControlMessage;
 use crate::stream::server::start_stream_server;
-use tako::server::core::CustomConnectionHandler;
 use tako::server::rpc::ConnectionDescriptor;
 
 struct Inner {

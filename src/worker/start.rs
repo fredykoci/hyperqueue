@@ -5,10 +5,10 @@ use anyhow::{anyhow, Context};
 use bstr::BString;
 use clap::Clap;
 use humantime::format_rfc3339;
-use tako::messages::common::{LauncherDefinition, ProgramDefinition, WorkerConfiguration};
-use tako::worker::launcher::pin_program;
+use tako::messages::common::{ProgramDefinition, WorkerConfiguration};
+use tako::worker::launcher::{command_from_definitions, pin_program};
 use tako::worker::rpc::run_worker;
-use tako::worker::task::Task;
+use tako::worker::task::{Task, TaskRef};
 use tempdir::TempDir;
 use tokio::task::LocalSet;
 
@@ -17,11 +17,15 @@ use crate::common::env::{HQ_CPUS, HQ_JOB_ID, HQ_PIN, HQ_SUBMIT_DIR, HQ_TASK_ID};
 use crate::common::error::error;
 use crate::common::serverdir::ServerDir;
 use crate::common::timeutils::ArgDuration;
+use crate::transfer::messages::TaskBody;
 use crate::worker::hwdetect::detect_resource;
 use crate::worker::output::print_worker_configuration;
 use crate::worker::parser::parse_cpu_definition;
 use crate::Map;
 use hashbrown::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use tako::common::error::DsError;
 
 #[derive(Clap)]
 pub enum ManagerOpts {
@@ -109,35 +113,56 @@ fn replace_placeholders(program: &mut ProgramDefinition) {
         program.cwd.as_ref().unwrap().to_str().unwrap().to_string(),
     );
 
-    program.stdout = program
-        .stdout
-        .as_ref()
-        .map(|path| replace(&placeholder_map, path));
-    program.stderr = program
-        .stderr
-        .as_ref()
-        .map(|path| replace(&placeholder_map, path));
+    program.stdout =
+        std::mem::take(&mut program.stdout).map_filename(|path| replace(&placeholder_map, &path));
+    program.stderr =
+        std::mem::take(&mut program.stderr).map_filename(|path| replace(&placeholder_map, &path));
 }
 
-#[allow(clippy::unnecessary_wraps)]
-fn launcher_setup(task: &Task, def: LauncherDefinition) -> tako::Result<ProgramDefinition> {
-    let allocation = task
-        .resource_allocation()
-        .expect("Missing resource allocation for running task");
-    let mut program = def.program;
+async fn launcher_main(task_ref: TaskRef) -> tako::Result<()> {
+    log::debug!(
+        "Starting program launcher {} {:?} {:?}",
+        task_ref.get().id,
+        &task_ref.get().resources,
+        task_ref.get().resource_allocation()
+    );
 
-    if def.pin {
-        pin_program(&mut program, &allocation);
-        program.env.insert(HQ_PIN.into(), "1".into());
+    let program: ProgramDefinition = {
+        let task = task_ref.get();
+        let body: TaskBody = tako::transfer::auth::deserialize(&task.spec)?;
+        let allocation = task
+            .resource_allocation()
+            .expect("Missing resource allocation for running task");
+        let mut program = body.program;
+
+        if body.pin {
+            pin_program(&mut program, &allocation);
+            program.env.insert(HQ_PIN.into(), "1".into());
+        }
+
+        program
+            .env
+            .insert(HQ_CPUS.into(), allocation.comma_delimited_cpu_ids().into());
+
+        replace_placeholders(&mut program);
+        program
+    };
+
+    let mut command = command_from_definitions(&program)?;
+    let status = command.status().await?;
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        return tako::Result::Err(DsError::GenericError(format!(
+            "Program terminated with exit code {}",
+            code
+        )));
     }
+    Ok(())
+}
 
-    program
-        .env
-        .insert(HQ_CPUS.into(), allocation.comma_delimited_cpu_ids().into());
-
-    replace_placeholders(&mut program);
-
-    Ok(program)
+fn launcher(task_ref: &TaskRef) -> Pin<Box<dyn Future<Output = tako::Result<()>> + 'static>> {
+    let task_ref = task_ref.clone();
+    Box::pin(async move { launcher_main(task_ref).await })
 }
 
 pub async fn start_hq_worker(
@@ -161,7 +186,7 @@ pub async fn start_hq_worker(
         &server_address,
         configuration,
         Some(record.tako_secret_key().clone()),
-        Box::new(launcher_setup),
+        Box::new(launcher),
     )
     .await?;
     print_worker_configuration(gsettings, worker_id, configuration);
@@ -256,7 +281,7 @@ fn gather_configuration(opts: WorkerStartOpts) -> anyhow::Result<WorkerConfigura
 #[cfg(test)]
 mod tests {
     use hashbrown::HashMap;
-    use tako::messages::common::ProgramDefinition;
+    use tako::messages::common::{ProgramDefinition, StdioDef};
 
     use crate::common::env::{HQ_JOB_ID, HQ_SUBMIT_DIR, HQ_TASK_ID};
     use crate::{JobId, JobTaskId};
@@ -275,8 +300,8 @@ mod tests {
         );
         replace_placeholders(&mut program);
         assert_eq!(program.cwd, Some("dir-1".into()));
-        assert_eq!(program.stdout, Some("1.out".into()));
-        assert_eq!(program.stderr, Some("1.err".into()));
+        assert_eq!(program.stdout, StdioDef::File("1.out".into()));
+        assert_eq!(program.stderr, StdioDef::File("1.err".into()));
     }
 
     #[test]
@@ -291,8 +316,8 @@ mod tests {
         );
         replace_placeholders(&mut program);
         assert_eq!(program.cwd, Some("dir-5-1".into()));
-        assert_eq!(program.stdout, Some("5-1.out".into()));
-        assert_eq!(program.stderr, Some("5-1.err".into()));
+        assert_eq!(program.stdout, StdioDef::File(("5-1.out".into())));
+        assert_eq!(program.stderr, StdioDef::File(("5-1.err".into())));
     }
 
     #[test]
@@ -307,8 +332,8 @@ mod tests {
         );
         replace_placeholders(&mut program);
         assert_eq!(program.cwd, Some("submit-dir".into()));
-        assert_eq!(program.stdout, Some("submit-dir/out".into()));
-        assert_eq!(program.stderr, Some("submit-dir/err".into()));
+        assert_eq!(program.stdout, StdioDef::File("submit-dir/out".into()));
+        assert_eq!(program.stderr, StdioDef::File("submit-dir/err".into()));
     }
 
     #[test]
@@ -323,8 +348,8 @@ mod tests {
         );
         replace_placeholders(&mut program);
         assert_eq!(program.cwd, Some("dir-5-1".into()));
-        assert_eq!(program.stdout, Some("dir-5-1.out".into()));
-        assert_eq!(program.stderr, Some("dir-5-1.err".into()));
+        assert_eq!(program.stdout, StdioDef::File("dir-5-1.out".into()));
+        assert_eq!(program.stderr, StdioDef::File("dir-5-1.err".into()));
     }
 
     fn program_def(
@@ -343,8 +368,8 @@ mod tests {
         ProgramDefinition {
             args: vec![],
             env,
-            stdout: stdout.map(|v| v.into()),
-            stderr: stderr.map(|v| v.into()),
+            stdout: stdout.map(|v| StdioDef::File(v.into())).unwrap_or_default(),
+            stderr: stderr.map(|v| StdioDef::File(v.into())).unwrap_or_default(),
             cwd: Some(cwd.into()),
         }
     }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use orion::kdf::SecretKey;
-use tako::messages::common::{LauncherDefinition, ProgramDefinition};
+use tako::messages::common::ProgramDefinition;
 use tako::messages::gateway::{
     CancelTasks, FromGatewayMessage, NewTasksMessage, StopWorkerRequest, TaskDef, ToGatewayMessage,
 };
@@ -17,7 +17,7 @@ use crate::server::state::StateRef;
 use crate::transfer::connection::ServerConnection;
 use crate::transfer::messages::{
     CancelJobResponse, FromClientMessage, JobInfoResponse, JobSelector, JobType, SubmitRequest,
-    SubmitResponse, ToClientMessage, WorkerListResponse,
+    SubmitResponse, TaskBody, ToClientMessage, WorkerListResponse,
 };
 use crate::{JobId, JobTaskCount, JobTaskId, WorkerId};
 use bstr::BString;
@@ -243,8 +243,8 @@ async fn handle_submit(
         if let Some(e) = entry {
             program.env.insert(HQ_ENTRY.into(), e);
         }
-        let launcher_def = LauncherDefinition { program, pin };
-        let body = rmp_serde::to_vec_named(&launcher_def).unwrap();
+        let body_msg = TaskBody { program, pin };
+        let body = tako::transfer::auth::serialize(&body_msg).unwrap();
         TaskDef {
             id: tako_id,
             type_id: 0,
