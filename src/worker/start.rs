@@ -5,7 +5,8 @@ use anyhow::{anyhow, Context};
 use bstr::BString;
 use clap::Clap;
 use humantime::format_rfc3339;
-use tako::messages::common::{ProgramDefinition, WorkerConfiguration};
+use tako::messages::common::WorkerConfiguration;
+use tako::messages::common::{ProgramDefinition, StdioDef};
 use tako::worker::launcher::{command_from_definitions, pin_program};
 use tako::worker::rpc::run_worker;
 use tako::worker::task::{Task, TaskRef};
@@ -21,10 +22,12 @@ use crate::transfer::messages::TaskBody;
 use crate::worker::hwdetect::detect_resource;
 use crate::worker::output::print_worker_configuration;
 use crate::worker::parser::parse_cpu_definition;
+use crate::worker::streamer::StreamerRef;
 use crate::Map;
 use hashbrown::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 use tako::common::error::DsError;
 
 #[derive(Clap)]
@@ -119,7 +122,7 @@ fn replace_placeholders(program: &mut ProgramDefinition) {
         std::mem::take(&mut program.stderr).map_filename(|path| replace(&placeholder_map, &path));
 }
 
-async fn launcher_main(task_ref: TaskRef) -> tako::Result<()> {
+async fn launcher_main(streamer_ref: StreamerRef, task_ref: TaskRef) -> tako::Result<()> {
     log::debug!(
         "Starting program launcher {} {:?} {:?}",
         task_ref.get().id,
@@ -148,8 +151,20 @@ async fn launcher_main(task_ref: TaskRef) -> tako::Result<()> {
         program
     };
 
+    let stream_stdio = matches!(program.stdout, StdioDef::Pipe);
+    let stream_stderr = matches!(program.stderr, StdioDef::Pipe);
+
     let mut command = command_from_definitions(&program)?;
-    let status = command.status().await?;
+
+    let status = if stream_stderr || stream_stderr {
+        let stream_fut = async move {
+            todo!();
+            Ok(())
+        };
+        tokio::try_join!(command.status(), stream_fut)?.0
+    } else {
+        command.status().await?
+    };
     if !status.success() {
         let code = status.code().unwrap_or(-1);
         return tako::Result::Err(DsError::GenericError(format!(
@@ -160,9 +175,13 @@ async fn launcher_main(task_ref: TaskRef) -> tako::Result<()> {
     Ok(())
 }
 
-fn launcher(task_ref: &TaskRef) -> Pin<Box<dyn Future<Output = tako::Result<()>> + 'static>> {
+fn launcher(
+    streamer_ref: &StreamerRef,
+    task_ref: &TaskRef,
+) -> Pin<Box<dyn Future<Output = tako::Result<()>> + 'static>> {
     let task_ref = task_ref.clone();
-    Box::pin(async move { launcher_main(task_ref).await })
+    let streamer_ref = streamer_ref.clone();
+    Box::pin(async move { launcher_main(streamer_ref, task_ref).await })
 }
 
 pub async fn start_hq_worker(
@@ -182,11 +201,14 @@ pub async fn start_hq_worker(
     log::info!("Connecting to: {}", server_address);
 
     let configuration = gather_configuration(opts)?;
+
+    let streamer_ref = StreamerRef::start(Duration::from_secs(10));
+
     let ((worker_id, configuration), worker_future) = run_worker(
         &server_address,
         configuration,
         Some(record.tako_secret_key().clone()),
-        Box::new(launcher),
+        Box::new(move |task_ref| launcher(&streamer_ref, task_ref)),
     )
     .await?;
     print_worker_configuration(gsettings, worker_id, configuration);
