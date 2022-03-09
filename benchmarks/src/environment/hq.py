@@ -168,7 +168,7 @@ class HqEnvironment(Environment, EnvStateManager):
         workdir = self.server_dir / "server"
 
         args = StartProcessArgs(
-            args=self._shared_args() + ["server", "start"],
+            args=self._shared_args() + ["server", "start","--event-log-path=data.bin"],
             hostname=self.nodes[0],
             name="server",
             workdir=workdir,
